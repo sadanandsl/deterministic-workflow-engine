@@ -1,0 +1,33 @@
+# Build output
+target/
+
+# IDE files
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment files
+.env
+.env.local
+
+# Test output
+test-output/
+surefire-reports/
+
+# Maven wrapper
+!.mvn/wrapper/maven-wrapper.jar
+
+# Docker volumes
+postgres_data/
+kafka_data/

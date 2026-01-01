@@ -1,0 +1,241 @@
+version: '3.8'
+
+# Workflow Orchestrator - Local Development Cluster
+# Usage:
+#   Single node:      docker compose up -d
+#   Full cluster:     docker compose --profile cluster up -d
+#   With monitoring:  docker compose --profile monitoring up -d
+#   Everything:       docker compose --profile cluster --profile monitoring up -d
+
+services:
+  # ============================================================
+  # Infrastructure Services
+  # ============================================================
+
+  postgres:
+    image: postgres:15
+    container_name: orchestrator-db
+    environment:
+      POSTGRES_DB: orchestrator
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: orchestrator
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestrator"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - orchestrator-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: orchestrator-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: orchestrator-cluster-001
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - orchestrator-network
+
+  # ============================================================
+  # Orchestrator Services
+  # ============================================================
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: orchestrator-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/orchestrator
+      SPRING_DATASOURCE_USERNAME: orchestrator
+      SPRING_DATASOURCE_PASSWORD: orchestrator
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,metrics,prometheus
+      ORCHESTRATOR_NODE_ID: orchestrator-1
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - orchestrator-network
+
+  # Additional orchestrator nodes for cluster testing
+  orchestrator-2:
+    profiles: ["cluster"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: orchestrator-api-2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/orchestrator
+      SPRING_DATASOURCE_USERNAME: orchestrator
+      SPRING_DATASOURCE_PASSWORD: orchestrator
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,metrics,prometheus
+      ORCHESTRATOR_NODE_ID: orchestrator-2
+      SERVER_PORT: 8080
+    ports:
+      - "8081:8080"
+    networks:
+      - orchestrator-network
+
+  orchestrator-3:
+    profiles: ["cluster"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: orchestrator-api-3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/orchestrator
+      SPRING_DATASOURCE_USERNAME: orchestrator
+      SPRING_DATASOURCE_PASSWORD: orchestrator
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,metrics,prometheus
+      ORCHESTRATOR_NODE_ID: orchestrator-3
+      SERVER_PORT: 8080
+    ports:
+      - "8082:8080"
+    networks:
+      - orchestrator-network
+
+  # Worker nodes for distributed task execution
+  worker-1:
+    profiles: ["cluster"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: orchestrator-worker-1
+    depends_on:
+      - kafka
+      - orchestrator
+    environment:
+      SPRING_PROFILES_ACTIVE: worker,docker
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      ORCHESTRATOR_WORKER_ID: worker-1
+      ORCHESTRATOR_WORKER_ACTIVITIES: process-order,send-email,validate-payment
+    networks:
+      - orchestrator-network
+
+  worker-2:
+    profiles: ["cluster"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: orchestrator-worker-2
+    depends_on:
+      - kafka
+      - orchestrator
+    environment:
+      SPRING_PROFILES_ACTIVE: worker,docker
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      ORCHESTRATOR_WORKER_ID: worker-2
+      ORCHESTRATOR_WORKER_ACTIVITIES: process-order,send-email,validate-payment
+    networks:
+      - orchestrator-network
+
+  # ============================================================
+  # Monitoring Stack
+  # ============================================================
+
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v2.47.0
+    container_name: orchestrator-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - orchestrator-network
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:10.1.0
+    container_name: orchestrator-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - orchestrator-network
+
+  # ============================================================
+  # Load Balancer (for cluster mode)
+  # ============================================================
+
+  nginx:
+    profiles: ["cluster"]
+    image: nginx:alpine
+    container_name: orchestrator-lb
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - orchestrator
+      - orchestrator-2
+      - orchestrator-3
+    networks:
+      - orchestrator-network
+
+networks:
+  orchestrator-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  kafka_data:
+  prometheus_data:
+  grafana_data:

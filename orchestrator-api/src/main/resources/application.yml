@@ -1,0 +1,73 @@
+# Workflow Orchestrator Configuration
+
+spring:
+  application:
+    name: workflow-orchestrator
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/orchestrator
+    username: ${DB_USERNAME:orchestrator}
+    password: ${DB_PASSWORD:orchestrator}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      idle-timeout: 30000
+      connection-timeout: 10000
+      max-lifetime: 600000
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      fail-on-unknown-properties: false
+
+server:
+  port: 8080
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+# Orchestrator specific configuration
+orchestrator:
+  # Lease configuration
+  lease:
+    default-duration: 30s
+    renewal-interval: 10s
+  
+  # Recovery configuration
+  recovery:
+    lease-check-interval: 5s
+    timeout-check-interval: 10s
+    stuck-workflow-threshold: 30m
+    batch-size: 100
+  
+  # Scheduler configuration
+  scheduler:
+    poll-interval: 1s
+    timer-precision: 5s
+  
+  # Worker configuration
+  worker:
+    poll-interval: 1s
+    max-concurrent-tasks: 10
+
+logging:
+  level:
+    com.orchestrator: DEBUG
+    org.springframework: INFO
+    org.hibernate: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
