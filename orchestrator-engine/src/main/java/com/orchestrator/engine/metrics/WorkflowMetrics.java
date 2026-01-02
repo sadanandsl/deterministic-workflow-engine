@@ -40,6 +40,15 @@ public class WorkflowMetrics implements MeterBinder {
     public static final String QUEUE_SIZE = "orchestrator.queue.size";
     public static final String RECOVERY_ATTEMPTS = "orchestrator.recovery.attempts";
 
+    // Saga and compensation metrics
+    public static final String SAGA_COMPENSATIONS = "orchestrator.saga.compensations";
+    public static final String COMPENSATION_DURATION = "orchestrator.compensation.duration";
+    
+    // Dead letter metrics
+    public static final String DEAD_LETTER_TOTAL = "orchestrator.dead_letter.total";
+    public static final String DEAD_LETTER_RETRIED = "orchestrator.dead_letter.retried";
+    public static final String DEAD_LETTER_DISCARDED = "orchestrator.dead_letter.discarded";
+
     private MeterRegistry registry;
     
     // Gauges for workflow states
@@ -274,6 +283,114 @@ public class WorkflowMetrics implements MeterBinder {
             .description("Workflow recovery attempts")
             .register(registry)
             .increment();
+    }
+
+    // ========== Saga/Compensation Metrics ==========
+
+    /**
+     * Record a saga compensation execution.
+     */
+    public void compensationStarted(String namespace, String workflowName, String compensationTaskName) {
+        Counter.builder(SAGA_COMPENSATIONS)
+            .tag("namespace", namespace)
+            .tag("workflow", workflowName)
+            .tag("task", compensationTaskName)
+            .tag("outcome", "started")
+            .description("Total saga compensations started")
+            .register(registry)
+            .increment();
+    }
+
+    /**
+     * Record successful saga compensation.
+     */
+    public void compensationCompleted(String namespace, String workflowName, 
+                                       String compensationTaskName, long durationMs) {
+        Counter.builder(SAGA_COMPENSATIONS)
+            .tag("namespace", namespace)
+            .tag("workflow", workflowName)
+            .tag("task", compensationTaskName)
+            .tag("outcome", "completed")
+            .description("Total saga compensations completed")
+            .register(registry)
+            .increment();
+        
+        Timer.builder(COMPENSATION_DURATION)
+            .tag("namespace", namespace)
+            .tag("workflow", workflowName)
+            .tag("task", compensationTaskName)
+            .description("Compensation execution duration")
+            .register(registry)
+            .record(java.time.Duration.ofMillis(durationMs));
+    }
+
+    /**
+     * Record failed saga compensation.
+     */
+    public void compensationFailed(String namespace, String workflowName, 
+                                    String compensationTaskName, String errorType) {
+        Counter.builder(SAGA_COMPENSATIONS)
+            .tag("namespace", namespace)
+            .tag("workflow", workflowName)
+            .tag("task", compensationTaskName)
+            .tag("outcome", "failed")
+            .tag("error_type", errorType)
+            .description("Total saga compensations failed")
+            .register(registry)
+            .increment();
+    }
+
+    // ========== Dead Letter Metrics ==========
+
+    /**
+     * Record a workflow moved to dead letter queue.
+     */
+    public void recordDeadLetter(String namespace, String workflowName, String reason) {
+        Counter.builder(DEAD_LETTER_TOTAL)
+            .tag("namespace", namespace)
+            .tag("workflow", workflowName)
+            .tag("reason", sanitizeReason(reason))
+            .description("Total workflows moved to dead letter queue")
+            .register(registry)
+            .increment();
+    }
+
+    /**
+     * Record a workflow retried from dead letter queue.
+     */
+    public void recordDeadLetterRetried(String namespace, String workflowName) {
+        Counter.builder(DEAD_LETTER_RETRIED)
+            .tag("namespace", namespace)
+            .tag("workflow", workflowName)
+            .description("Total workflows retried from dead letter queue")
+            .register(registry)
+            .increment();
+    }
+
+    /**
+     * Record a workflow discarded from dead letter queue.
+     */
+    public void recordDeadLetterDiscarded(String namespace, String workflowName) {
+        Counter.builder(DEAD_LETTER_DISCARDED)
+            .tag("namespace", namespace)
+            .tag("workflow", workflowName)
+            .description("Total workflows discarded from dead letter queue")
+            .register(registry)
+            .increment();
+    }
+
+    /**
+     * Sanitize reason string for use as a metric tag.
+     */
+    private String sanitizeReason(String reason) {
+        if (reason == null || reason.isBlank()) {
+            return "unspecified";
+        }
+        // Truncate and normalize for metric label
+        String sanitized = reason.toLowerCase()
+            .replaceAll("[^a-z0-9_]", "_")
+            .replaceAll("_+", "_");
+        return sanitized.length() > 50 ? sanitized.substring(0, 50) : sanitized;
     }
 
     // ========== Helper Methods ==========

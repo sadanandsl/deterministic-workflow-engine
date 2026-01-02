@@ -1,8 +1,8 @@
 package com.orchestrator.engine.history;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.orchestrator.core.event.EventType;
-import com.orchestrator.core.event.WorkflowEvent;
+import com.orchestrator.core.model.Event;
+import com.orchestrator.core.model.EventType;
 import com.orchestrator.core.model.WorkflowInstance;
 import com.orchestrator.core.model.WorkflowState;
 import com.orchestrator.core.repository.EventRepository;
@@ -47,7 +47,7 @@ public class ExecutionHistoryService {
         WorkflowInstance instance = instanceRepository.findById(workflowInstanceId)
             .orElseThrow(() -> new IllegalArgumentException("Workflow not found: " + workflowInstanceId));
         
-        List<WorkflowEvent> events = eventRepository.findByWorkflowInstance(workflowInstanceId);
+        List<Event> events = eventRepository.findByWorkflowInstance(workflowInstanceId);
         
         return ExecutionHistory.builder()
             .workflowInstanceId(workflowInstanceId)
@@ -65,8 +65,11 @@ public class ExecutionHistoryService {
     /**
      * Get events in a specific sequence range.
      */
-    public List<WorkflowEvent> getEventRange(UUID workflowInstanceId, long fromSeq, long toSeq) {
-        return eventRepository.findByWorkflowInstance(workflowInstanceId, fromSeq, toSeq);
+    public List<Event> getEventRange(UUID workflowInstanceId, long fromSeq, long toSeq) {
+        List<Event> allEvents = eventRepository.findByWorkflowInstanceFrom(workflowInstanceId, fromSeq);
+        return allEvents.stream()
+            .filter(e -> e.sequenceNumber() <= toSeq)
+            .collect(Collectors.toList());
     }
 
     /**
@@ -77,10 +80,12 @@ public class ExecutionHistoryService {
     public ReplayResult replayToSequence(UUID workflowInstanceId, long targetSequence) {
         log.info("Replaying workflow {} to sequence {}", workflowInstanceId, targetSequence);
         
-        List<WorkflowEvent> events = eventRepository.findByWorkflowInstance(
-            workflowInstanceId, 0, targetSequence);
+        List<Event> events = eventRepository.findByWorkflowInstance(workflowInstanceId);
+        List<Event> filteredEvents = events.stream()
+            .filter(e -> e.sequenceNumber() <= targetSequence)
+            .collect(Collectors.toList());
         
-        return reconstructState(workflowInstanceId, events);
+        return reconstructState(workflowInstanceId, filteredEvents);
     }
 
     /**
@@ -90,10 +95,10 @@ public class ExecutionHistoryService {
     public ReplayResult replayToTimestamp(UUID workflowInstanceId, Instant targetTime) {
         log.info("Replaying workflow {} to timestamp {}", workflowInstanceId, targetTime);
         
-        List<WorkflowEvent> events = eventRepository.findByWorkflowInstance(workflowInstanceId);
+        List<Event> events = eventRepository.findByWorkflowInstance(workflowInstanceId);
         
         // Filter events up to target time
-        List<WorkflowEvent> filteredEvents = events.stream()
+        List<Event> filteredEvents = events.stream()
             .filter(e -> !e.timestamp().isAfter(targetTime))
             .collect(Collectors.toList());
         
@@ -103,8 +108,8 @@ public class ExecutionHistoryService {
     /**
      * Reconstruct workflow state from a list of events.
      */
-    private ReplayResult reconstructState(UUID workflowInstanceId, List<WorkflowEvent> events) {
-        WorkflowState state = WorkflowState.PENDING;
+    private ReplayResult reconstructState(UUID workflowInstanceId, List<Event> events) {
+        WorkflowState state = WorkflowState.CREATED;
         Set<String> completedTasks = new HashSet<>();
         Set<String> failedTasks = new HashSet<>();
         Map<String, JsonNode> taskOutputs = new HashMap<>();
@@ -114,8 +119,8 @@ public class ExecutionHistoryService {
         Instant startedAt = null;
         Instant completedAt = null;
         
-        for (WorkflowEvent event : events) {
-            switch (event.eventType()) {
+        for (Event event : events) {
+            switch (event.type()) {
                 case WORKFLOW_STARTED -> {
                     state = WorkflowState.RUNNING;
                     startedAt = event.timestamp();
@@ -123,15 +128,13 @@ public class ExecutionHistoryService {
                 case WORKFLOW_COMPLETED -> {
                     state = WorkflowState.COMPLETED;
                     completedAt = event.timestamp();
-                    if (event.payload() instanceof Map map) {
-                        output = extractJsonNode(map, "output");
-                    }
+                    output = event.payload();
                 }
                 case WORKFLOW_FAILED -> {
                     state = WorkflowState.FAILED;
                     completedAt = event.timestamp();
-                    if (event.payload() instanceof Map map) {
-                        lastError = (String) map.get("error");
+                    if (event.payload() != null && event.payload().has("error")) {
+                        lastError = event.payload().get("error").asText();
                     }
                 }
                 case WORKFLOW_PAUSED -> state = WorkflowState.PAUSED;
@@ -140,23 +143,26 @@ public class ExecutionHistoryService {
                     state = WorkflowState.FAILED;
                     completedAt = event.timestamp();
                 }
-                case TASK_SCHEDULED -> currentTaskId = event.taskName();
+                case TASK_SCHEDULED -> {
+                    if (event.payload() != null && event.payload().has("taskId")) {
+                        currentTaskId = event.payload().get("taskId").asText();
+                    }
+                }
                 case TASK_COMPLETED -> {
-                    if (event.taskName() != null) {
-                        completedTasks.add(event.taskName());
-                        if (event.payload() instanceof Map map) {
-                            JsonNode taskOutput = extractJsonNode(map, "output");
-                            if (taskOutput != null) {
-                                taskOutputs.put(event.taskName(), taskOutput);
-                            }
+                    if (event.payload() != null && event.payload().has("taskId")) {
+                        String taskId = event.payload().get("taskId").asText();
+                        completedTasks.add(taskId);
+                        if (event.payload().has("output")) {
+                            taskOutputs.put(taskId, event.payload().get("output"));
                         }
                     }
                 }
                 case TASK_FAILED -> {
-                    if (event.taskName() != null) {
-                        failedTasks.add(event.taskName());
-                        if (event.payload() instanceof Map map) {
-                            lastError = (String) map.get("error");
+                    if (event.payload() != null && event.payload().has("taskId")) {
+                        String taskId = event.payload().get("taskId").asText();
+                        failedTasks.add(taskId);
+                        if (event.payload().has("error")) {
+                            lastError = event.payload().get("error").asText();
                         }
                     }
                 }
@@ -188,14 +194,14 @@ public class ExecutionHistoryService {
     /**
      * Build a timeline of key events for visualization.
      */
-    private List<TimelineEntry> buildTimeline(List<WorkflowEvent> events) {
+    private List<TimelineEntry> buildTimeline(List<Event> events) {
         return events.stream()
-            .filter(e -> isKeyEvent(e.eventType()))
+            .filter(e -> isKeyEvent(e.type()))
             .map(e -> new TimelineEntry(
                 e.timestamp(),
                 e.sequenceNumber(),
-                e.eventType().name(),
-                e.taskName(),
+                e.type().name(),
+                extractTaskId(e),
                 summarizePayload(e.payload())
             ))
             .collect(Collectors.toList());
@@ -204,15 +210,16 @@ public class ExecutionHistoryService {
     /**
      * Build history of each task execution.
      */
-    private Map<String, TaskHistory> buildTaskHistory(List<WorkflowEvent> events) {
+    private Map<String, TaskHistory> buildTaskHistory(List<Event> events) {
         Map<String, List<TaskHistoryEntry>> taskEvents = new LinkedHashMap<>();
         
-        for (WorkflowEvent event : events) {
-            if (event.taskName() != null && isTaskEvent(event.eventType())) {
-                taskEvents.computeIfAbsent(event.taskName(), k -> new ArrayList<>())
+        for (Event event : events) {
+            String taskId = extractTaskId(event);
+            if (taskId != null && isTaskEvent(event.type())) {
+                taskEvents.computeIfAbsent(taskId, k -> new ArrayList<>())
                     .add(new TaskHistoryEntry(
                         event.timestamp(),
-                        event.eventType().name(),
+                        event.type().name(),
                         extractAttemptNumber(event.payload()),
                         summarizePayload(event.payload())
                     ));
@@ -229,17 +236,17 @@ public class ExecutionHistoryService {
     /**
      * Calculate execution statistics.
      */
-    private ExecutionStatistics calculateStatistics(List<WorkflowEvent> events, WorkflowInstance instance) {
+    private ExecutionStatistics calculateStatistics(List<Event> events, WorkflowInstance instance) {
         long taskCount = events.stream()
-            .filter(e -> e.eventType() == EventType.TASK_COMPLETED)
+            .filter(e -> e.type() == EventType.TASK_COMPLETED)
             .count();
         
         long retryCount = events.stream()
-            .filter(e -> e.eventType() == EventType.TASK_RETRYING)
+            .filter(e -> e.type() == EventType.TASK_RETRYING)
             .count();
         
         long failureCount = events.stream()
-            .filter(e -> e.eventType() == EventType.TASK_FAILED)
+            .filter(e -> e.type() == EventType.TASK_FAILED)
             .count();
         
         Duration totalDuration = instance.completedAt() != null && instance.startedAt() != null
@@ -272,26 +279,24 @@ public class ExecutionHistoryService {
         return type.name().startsWith("TASK_");
     }
 
-    private String summarizePayload(Object payload) {
+    private String extractTaskId(Event event) {
+        if (event.payload() != null && event.payload().has("taskId")) {
+            return event.payload().get("taskId").asText();
+        }
+        return null;
+    }
+
+    private String summarizePayload(JsonNode payload) {
         if (payload == null) return null;
         String str = payload.toString();
         return str.length() > 200 ? str.substring(0, 200) + "..." : str;
     }
 
-    private int extractAttemptNumber(Object payload) {
-        if (payload instanceof Map map) {
-            Object attempt = map.get("attemptNumber");
-            if (attempt instanceof Number n) {
-                return n.intValue();
-            }
+    private int extractAttemptNumber(JsonNode payload) {
+        if (payload != null && payload.has("attemptNumber")) {
+            return payload.get("attemptNumber").asInt(1);
         }
         return 1;
-    }
-
-    @SuppressWarnings("unchecked")
-    private JsonNode extractJsonNode(Map<?, ?> map, String key) {
-        // Placeholder - actual implementation would use ObjectMapper
-        return null;
     }
 
     private Duration calculateTaskDuration(List<TaskHistoryEntry> entries) {
@@ -321,7 +326,7 @@ public class ExecutionHistoryService {
         String workflowName,
         String runId,
         WorkflowState currentState,
-        List<WorkflowEvent> events,
+        List<Event> events,
         List<TimelineEntry> timeline,
         Map<String, TaskHistory> taskHistory,
         ExecutionStatistics statistics
@@ -336,7 +341,7 @@ public class ExecutionHistoryService {
             private String workflowName;
             private String runId;
             private WorkflowState currentState;
-            private List<WorkflowEvent> events = List.of();
+            private List<Event> events = List.of();
             private List<TimelineEntry> timeline = List.of();
             private Map<String, TaskHistory> taskHistory = Map.of();
             private ExecutionStatistics statistics;
@@ -346,7 +351,7 @@ public class ExecutionHistoryService {
             public Builder workflowName(String name) { this.workflowName = name; return this; }
             public Builder runId(String runId) { this.runId = runId; return this; }
             public Builder currentState(WorkflowState state) { this.currentState = state; return this; }
-            public Builder events(List<WorkflowEvent> events) { this.events = events; return this; }
+            public Builder events(List<Event> events) { this.events = events; return this; }
             public Builder timeline(List<TimelineEntry> timeline) { this.timeline = timeline; return this; }
             public Builder taskHistory(Map<String, TaskHistory> history) { this.taskHistory = history; return this; }
             public Builder statistics(ExecutionStatistics stats) { this.statistics = stats; return this; }
@@ -398,8 +403,8 @@ public class ExecutionHistoryService {
     public record ExecutionStatistics(
         long totalEvents,
         long completedTasks,
-        long retryCount,
-        long failureCount,
+        long retries,
+        long failures,
         Duration totalDuration,
         int recoveryAttempts
     ) {}

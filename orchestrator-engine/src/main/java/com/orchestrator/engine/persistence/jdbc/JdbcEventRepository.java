@@ -1,9 +1,10 @@
 package com.orchestrator.engine.persistence.jdbc;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.orchestrator.core.event.WorkflowEvent;
-import com.orchestrator.core.event.EventType;
+import com.orchestrator.core.model.Event;
+import com.orchestrator.core.model.EventType;
 import com.orchestrator.core.repository.EventRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,6 +17,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -35,53 +37,52 @@ public class JdbcEventRepository implements EventRepository {
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
-    private final WorkflowEventRowMapper rowMapper;
+    private final EventRowMapper rowMapper;
 
     public JdbcEventRepository(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
-        this.rowMapper = new WorkflowEventRowMapper(objectMapper);
+        this.rowMapper = new EventRowMapper(objectMapper);
     }
 
     @Override
     @Transactional
-    public WorkflowEvent append(WorkflowEvent event) {
+    public void append(Event event) {
         String sql = """
             INSERT INTO events (
                 event_id, workflow_instance_id, sequence_number,
-                event_type, event_timestamp, task_name, task_execution_id,
-                idempotency_key, payload, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb)
+                event_type, event_timestamp, payload,
+                caused_by_event_id, idempotency_key,
+                trace_id, span_id, actor_type, actor_id
+            ) VALUES (?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (idempotency_key) DO NOTHING
-            RETURNING event_id
             """;
 
         try {
             String payloadJson = serializePayload(event.payload());
-            String metadataJson = serializeMetadata(event.metadata());
 
-            UUID returnedId = jdbcTemplate.queryForObject(sql, UUID.class,
+            int rows = jdbcTemplate.update(sql,
                 event.eventId(),
                 event.workflowInstanceId(),
                 event.sequenceNumber(),
-                event.eventType().name(),
+                event.type().name(),
                 Timestamp.from(event.timestamp()),
-                event.taskName(),
-                event.taskExecutionId(),
-                event.idempotencyKey(),
                 payloadJson,
-                metadataJson
+                event.causedByEventId(),
+                event.idempotencyKey(),
+                event.traceId(),
+                event.spanId(),
+                event.actorType(),
+                event.actorId()
             );
 
-            if (returnedId != null) {
+            if (rows > 0) {
                 log.debug("Appended event {} (seq={}) for workflow {}", 
                     event.eventId(), event.sequenceNumber(), event.workflowInstanceId());
             } else {
                 log.debug("Event with idempotency key {} already exists, skipped", 
                     event.idempotencyKey());
             }
-
-            return event;
         } catch (Exception e) {
             log.error("Failed to append event: {}", e.getMessage());
             throw new RuntimeException("Failed to append event", e);
@@ -90,14 +91,14 @@ public class JdbcEventRepository implements EventRepository {
 
     @Override
     @Transactional
-    public List<WorkflowEvent> appendAll(List<WorkflowEvent> events) {
-        // Batch insert for efficiency
+    public void appendAll(List<Event> events) {
         String sql = """
             INSERT INTO events (
                 event_id, workflow_instance_id, sequence_number,
-                event_type, event_timestamp, task_name, task_execution_id,
-                idempotency_key, payload, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb)
+                event_type, event_timestamp, payload,
+                caused_by_event_id, idempotency_key,
+                trace_id, span_id, actor_type, actor_id
+            ) VALUES (?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (idempotency_key) DO NOTHING
             """;
 
@@ -105,21 +106,36 @@ public class JdbcEventRepository implements EventRepository {
             ps.setObject(1, event.eventId());
             ps.setObject(2, event.workflowInstanceId());
             ps.setLong(3, event.sequenceNumber());
-            ps.setString(4, event.eventType().name());
+            ps.setString(4, event.type().name());
             ps.setTimestamp(5, Timestamp.from(event.timestamp()));
-            ps.setString(6, event.taskName());
-            ps.setObject(7, event.taskExecutionId());
+            ps.setString(6, serializePayload(event.payload()));
+            ps.setObject(7, event.causedByEventId());
             ps.setString(8, event.idempotencyKey());
-            ps.setString(9, serializePayload(event.payload()));
-            ps.setString(10, serializeMetadata(event.metadata()));
+            ps.setString(9, event.traceId());
+            ps.setString(10, event.spanId());
+            ps.setString(11, event.actorType());
+            ps.setString(12, event.actorId());
         });
 
         log.debug("Batch appended {} events", events.size());
-        return events;
     }
 
     @Override
-    public List<WorkflowEvent> findByWorkflowInstance(UUID workflowInstanceId) {
+    public Optional<Event> findById(UUID eventId) {
+        String sql = "SELECT * FROM events WHERE event_id = ?";
+        List<Event> results = jdbcTemplate.query(sql, rowMapper, eventId);
+        return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
+    }
+
+    @Override
+    public Optional<Event> findByIdempotencyKey(String idempotencyKey) {
+        String sql = "SELECT * FROM events WHERE idempotency_key = ?";
+        List<Event> results = jdbcTemplate.query(sql, rowMapper, idempotencyKey);
+        return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
+    }
+
+    @Override
+    public List<Event> findByWorkflowInstance(UUID workflowInstanceId) {
         String sql = """
             SELECT * FROM events 
             WHERE workflow_instance_id = ?
@@ -129,7 +145,7 @@ public class JdbcEventRepository implements EventRepository {
     }
 
     @Override
-    public List<WorkflowEvent> findByWorkflowInstance(UUID workflowInstanceId, long fromSequence) {
+    public List<Event> findByWorkflowInstanceFrom(UUID workflowInstanceId, long fromSequence) {
         String sql = """
             SELECT * FROM events 
             WHERE workflow_instance_id = ? AND sequence_number >= ?
@@ -139,71 +155,105 @@ public class JdbcEventRepository implements EventRepository {
     }
 
     @Override
-    public List<WorkflowEvent> findByWorkflowInstance(UUID workflowInstanceId, 
-                                                       long fromSequence, long toSequence) {
+    public List<Event> findByWorkflowInstanceAndTypes(UUID workflowInstanceId, List<EventType> types) {
+        if (types == null || types.isEmpty()) {
+            return findByWorkflowInstance(workflowInstanceId);
+        }
+        
+        String placeholders = String.join(",", types.stream().map(t -> "?").toList());
         String sql = """
             SELECT * FROM events 
-            WHERE workflow_instance_id = ? 
-              AND sequence_number >= ? 
-              AND sequence_number <= ?
+            WHERE workflow_instance_id = ? AND event_type IN (%s)
             ORDER BY sequence_number ASC
-            """;
-        return jdbcTemplate.query(sql, rowMapper, workflowInstanceId, fromSequence, toSequence);
-    }
-
-    @Override
-    public List<WorkflowEvent> findByEventType(UUID workflowInstanceId, EventType eventType) {
-        String sql = """
-            SELECT * FROM events 
-            WHERE workflow_instance_id = ? AND event_type = ?
-            ORDER BY sequence_number ASC
-            """;
-        return jdbcTemplate.query(sql, rowMapper, workflowInstanceId, eventType.name());
-    }
-
-    @Override
-    public Optional<WorkflowEvent> findByIdempotencyKey(String idempotencyKey) {
-        String sql = "SELECT * FROM events WHERE idempotency_key = ?";
-        List<WorkflowEvent> results = jdbcTemplate.query(sql, rowMapper, idempotencyKey);
-        return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
+            """.formatted(placeholders);
+        
+        Object[] params = new Object[types.size() + 1];
+        params[0] = workflowInstanceId;
+        for (int i = 0; i < types.size(); i++) {
+            params[i + 1] = types.get(i).name();
+        }
+        
+        return jdbcTemplate.query(sql, rowMapper, params);
     }
 
     @Override
     public long getNextSequenceNumber(UUID workflowInstanceId) {
         String sql = """
-            SELECT COALESCE(MAX(sequence_number), 0) + 1 
+            SELECT COALESCE(MAX(sequence_number), -1) + 1 
             FROM events 
             WHERE workflow_instance_id = ?
             """;
         Long seq = jdbcTemplate.queryForObject(sql, Long.class, workflowInstanceId);
-        return seq != null ? seq : 1L;
+        return seq != null ? seq : 0L;
     }
 
     @Override
-    public long countEvents(UUID workflowInstanceId) {
-        String sql = "SELECT COUNT(*) FROM events WHERE workflow_instance_id = ?";
-        Long count = jdbcTemplate.queryForObject(sql, Long.class, workflowInstanceId);
-        return count != null ? count : 0L;
-    }
-
-    @Override
-    public List<WorkflowEvent> findRecentEvents(int limit) {
+    public Optional<Event> findLatestByWorkflowInstance(UUID workflowInstanceId) {
         String sql = """
             SELECT * FROM events 
-            ORDER BY event_timestamp DESC, sequence_number DESC
-            LIMIT ?
+            WHERE workflow_instance_id = ?
+            ORDER BY sequence_number DESC
+            LIMIT 1
             """;
-        return jdbcTemplate.query(sql, rowMapper, limit);
+        List<Event> results = jdbcTemplate.query(sql, rowMapper, workflowInstanceId);
+        return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
     }
 
     @Override
-    @Transactional
-    public int deleteByWorkflowInstance(UUID workflowInstanceId) {
-        String sql = "DELETE FROM events WHERE workflow_instance_id = ?";
-        return jdbcTemplate.update(sql, workflowInstanceId);
+    public List<Event> findByTimeRange(Instant from, Instant to, List<EventType> types, int limit) {
+        if (types == null || types.isEmpty()) {
+            String sql = """
+                SELECT * FROM events 
+                WHERE event_timestamp >= ? AND event_timestamp < ?
+                ORDER BY event_timestamp DESC
+                LIMIT ?
+                """;
+            return jdbcTemplate.query(sql, rowMapper, Timestamp.from(from), Timestamp.from(to), limit);
+        }
+        
+        String placeholders = String.join(",", types.stream().map(t -> "?").toList());
+        String sql = """
+            SELECT * FROM events 
+            WHERE event_timestamp >= ? AND event_timestamp < ? AND event_type IN (%s)
+            ORDER BY event_timestamp DESC
+            LIMIT ?
+            """.formatted(placeholders);
+        
+        Object[] params = new Object[types.size() + 3];
+        params[0] = Timestamp.from(from);
+        params[1] = Timestamp.from(to);
+        for (int i = 0; i < types.size(); i++) {
+            params[i + 2] = types.get(i).name();
+        }
+        params[params.length - 1] = limit;
+        
+        return jdbcTemplate.query(sql, rowMapper, params);
     }
 
-    private String serializePayload(Object payload) {
+    @Override
+    public Map<EventType, Long> countByType(UUID workflowInstanceId) {
+        String sql = """
+            SELECT event_type, COUNT(*) as count 
+            FROM events 
+            WHERE workflow_instance_id = ?
+            GROUP BY event_type
+            """;
+        
+        Map<EventType, Long> result = new HashMap<>();
+        jdbcTemplate.query(sql, rs -> {
+            String typeName = rs.getString("event_type");
+            Long count = rs.getLong("count");
+            try {
+                result.put(EventType.valueOf(typeName), count);
+            } catch (IllegalArgumentException e) {
+                log.warn("Unknown event type in database: {}", typeName);
+            }
+        }, workflowInstanceId);
+        
+        return result;
+    }
+
+    private String serializePayload(JsonNode payload) {
         if (payload == null) {
             return "{}";
         }
@@ -215,67 +265,45 @@ public class JdbcEventRepository implements EventRepository {
         }
     }
 
-    private String serializeMetadata(Map<String, String> metadata) {
-        if (metadata == null || metadata.isEmpty()) {
-            return "{}";
-        }
-        try {
-            return objectMapper.writeValueAsString(metadata);
-        } catch (JsonProcessingException e) {
-            log.warn("Failed to serialize metadata: {}", e.getMessage());
-            return "{}";
-        }
-    }
-
-    private class WorkflowEventRowMapper implements RowMapper<WorkflowEvent> {
+    private class EventRowMapper implements RowMapper<Event> {
         private final ObjectMapper objectMapper;
 
-        WorkflowEventRowMapper(ObjectMapper objectMapper) {
+        EventRowMapper(ObjectMapper objectMapper) {
             this.objectMapper = objectMapper;
         }
 
         @Override
-        public WorkflowEvent mapRow(ResultSet rs, int rowNum) throws SQLException {
-            Object payload = deserializePayload(rs.getString("payload"));
-            Map<String, String> metadata = deserializeMetadata(rs.getString("metadata"));
+        public Event mapRow(ResultSet rs, int rowNum) throws SQLException {
+            JsonNode payload = deserializePayload(rs.getString("payload"));
             
-            return new WorkflowEvent(
+            UUID causedByEventId = rs.getString("caused_by_event_id") != null
+                ? UUID.fromString(rs.getString("caused_by_event_id")) : null;
+            
+            return new Event(
                 UUID.fromString(rs.getString("event_id")),
                 UUID.fromString(rs.getString("workflow_instance_id")),
                 rs.getLong("sequence_number"),
                 EventType.valueOf(rs.getString("event_type")),
                 rs.getTimestamp("event_timestamp").toInstant(),
-                rs.getString("task_name"),
-                rs.getString("task_execution_id") != null 
-                    ? UUID.fromString(rs.getString("task_execution_id")) : null,
-                rs.getString("idempotency_key"),
                 payload,
-                metadata
+                causedByEventId,
+                rs.getString("idempotency_key"),
+                rs.getString("trace_id"),
+                rs.getString("span_id"),
+                rs.getString("actor_type"),
+                rs.getString("actor_id")
             );
         }
 
-        private Object deserializePayload(String json) {
+        private JsonNode deserializePayload(String json) {
             if (json == null || json.isBlank() || "{}".equals(json)) {
                 return null;
             }
             try {
-                return objectMapper.readValue(json, Object.class);
+                return objectMapper.readTree(json);
             } catch (JsonProcessingException e) {
                 log.warn("Failed to deserialize payload: {}", e.getMessage());
                 return null;
-            }
-        }
-
-        @SuppressWarnings("unchecked")
-        private Map<String, String> deserializeMetadata(String json) {
-            if (json == null || json.isBlank() || "{}".equals(json)) {
-                return Map.of();
-            }
-            try {
-                return objectMapper.readValue(json, Map.class);
-            } catch (JsonProcessingException e) {
-                log.warn("Failed to deserialize metadata: {}", e.getMessage());
-                return Map.of();
             }
         }
     }

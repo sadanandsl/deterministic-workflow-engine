@@ -80,8 +80,8 @@ public class JdbcWorkflowDefinitionRepository implements WorkflowDefinitionRepos
                 definition.entryTaskId(),
                 serializeJson(definition.terminalTaskIds()),
                 retry.maxAttempts(),
-                retry.initialDelay().toMillis(),
-                retry.maxDelay().toMillis(),
+                retry.initialBackoff().toMillis(),
+                retry.maxBackoff().toMillis(),
                 retry.backoffMultiplier(),
                 definition.maxDuration().toMillis(),
                 definition.compensationStrategy().name(),
@@ -201,7 +201,9 @@ public class JdbcWorkflowDefinitionRepository implements WorkflowDefinitionRepos
                 Duration.ofMillis(rs.getLong("default_retry_initial_delay_ms")),
                 Duration.ofMillis(rs.getLong("default_retry_max_delay_ms")),
                 rs.getDouble("default_retry_backoff_multiplier"),
-                List.of() // retryableExceptions loaded separately if needed
+                0.1, // default jitter factor
+                Set.of(), // retryableErrors
+                Set.of()  // nonRetryableErrors
             );
 
             return new WorkflowDefinition(

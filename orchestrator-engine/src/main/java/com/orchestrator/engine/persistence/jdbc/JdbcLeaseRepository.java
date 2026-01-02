@@ -188,12 +188,18 @@ public class JdbcLeaseRepository implements LeaseRepository {
     }
 
     @Override
-    public int cleanupExpired(Instant olderThan) {
+    public boolean validateFenceToken(String leaseKey, long fenceToken) {
+        long currentToken = getFenceToken(leaseKey);
+        return currentToken == fenceToken;
+    }
+
+    @Override
+    public int deleteExpiredBefore(Instant expiredBefore) {
         String sql = """
             DELETE FROM execution_leases 
             WHERE expires_at < ? AND holder_id IS NULL
             """;
-        return jdbcTemplate.update(sql, Timestamp.from(olderThan));
+        return jdbcTemplate.update(sql, Timestamp.from(expiredBefore));
     }
 
     private static class ExecutionLeaseRowMapper implements RowMapper<ExecutionLease> {

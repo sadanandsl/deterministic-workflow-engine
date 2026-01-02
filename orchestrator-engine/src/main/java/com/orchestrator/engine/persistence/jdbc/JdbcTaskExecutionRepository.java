@@ -222,7 +222,7 @@ public class JdbcTaskExecutionRepository implements TaskExecutionRepository {
     }
 
     @Override
-    public List<TaskExecution> findPendingTasks(String activityType, int limit) {
+    public List<TaskExecution> findQueuedByActivityType(String activityType, int limit) {
         String sql = """
             SELECT te.* FROM task_executions te
             WHERE te.state = 'QUEUED'
@@ -233,6 +233,16 @@ public class JdbcTaskExecutionRepository implements TaskExecutionRepository {
     }
 
     @Override
+    public int getCurrentAttemptCount(UUID workflowInstanceId, String taskId) {
+        String sql = """
+            SELECT COALESCE(MAX(attempt_number), 0)
+            FROM task_executions
+            WHERE workflow_instance_id = ? AND task_id = ?
+            """;
+        Integer count = jdbcTemplate.queryForObject(sql, Integer.class, workflowInstanceId, taskId);
+        return count != null ? count : 0;
+    }
+
     public int countByWorkflowAndState(UUID workflowInstanceId, TaskState state) {
         String sql = """
             SELECT COUNT(*) FROM task_executions 

@@ -201,10 +201,10 @@ public class GracefulShutdownHandler {
     private boolean releaseLeaseByKey(String leaseKey) {
         try {
             // Try to find and release the lease
-            var leaseOpt = leaseRepository.findByLeaseKey(leaseKey);
+            var leaseOpt = leaseRepository.findByKey(leaseKey);
             if (leaseOpt.isPresent()) {
                 var lease = leaseOpt.get();
-                leaseRepository.releaseLease(lease.getLeaseKey(), lease.getOwnerId());
+                leaseRepository.release(lease.leaseKey(), lease.holderId());
                 log.debug("Released lease: {}", leaseKey);
                 return true;
             } else {
