@@ -284,6 +284,70 @@ orchestrator:
     default-max-backoff: 5m
 ```
 
+## Operations
+
+### Health Checks
+
+```bash
+# Liveness probe (is the service running?)
+curl http://localhost:8080/actuator/health/liveness
+
+# Readiness probe (is the service ready to accept traffic?)
+curl http://localhost:8080/actuator/health/readiness
+
+# Full health details
+curl http://localhost:8080/actuator/health
+```
+
+Health check response includes:
+- Database connectivity
+- Workflow counts by state
+- Active/expired lease counts
+- Kafka status (if enabled)
+
+### Monitoring
+
+**Prometheus Metrics** available at `/actuator/prometheus`:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orchestrator.workflows.started` | Counter | Total workflows started |
+| `orchestrator.workflows.completed` | Counter | Total workflows completed |
+| `orchestrator.workflows.failed` | Counter | Total workflows failed |
+| `orchestrator.workflows` | Gauge | Current workflow count by state |
+| `orchestrator.task.duration` | Timer | Task execution latency |
+| `orchestrator.task.retries` | Counter | Total retry attempts |
+| `orchestrator.lease.expirations` | Counter | Lease expirations (indicates crashes) |
+| `orchestrator.recovery.attempts` | Counter | Recovery attempts |
+
+**Grafana Dashboard**: Pre-configured dashboard at `http://localhost:3000` (admin/admin)
+
+### Structured Logging
+
+Logs include MDC context for correlation:
+
+```
+2024-01-15 10:30:45.123 [worker-1] INFO  [abc123] [wf=550e8400-e29b-41d4-a716-446655440000] [task=process-payment] c.o.e.TaskCoordinator - Task completed
+```
+
+Fields: `traceId`, `workflowId`, `taskId`, `attempt`, `correlationId`
+
+### Graceful Shutdown
+
+On `SIGTERM` or `SIGINT`:
+1. Stops accepting new tasks
+2. Waits up to 30s for in-flight tasks
+3. Releases all held leases
+4. Logs shutdown status
+
+```bash
+# Trigger graceful shutdown
+kill -SIGTERM <pid>
+
+# Or via actuator
+curl -X POST http://localhost:8080/actuator/shutdown
+```
+
 ## Documentation
 
 | Document | Description |

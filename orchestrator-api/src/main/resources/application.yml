@@ -39,6 +39,19 @@ management:
   endpoint:
     health:
       show-details: always
+      probes:
+        enabled: true
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    export:
+      prometheus:
+        enabled: true
 
 # Orchestrator specific configuration
 orchestrator:
@@ -70,4 +83,4 @@ logging:
     org.springframework: INFO
     org.hibernate: WARN
   pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId:-}] [wf=%X{workflowId:-}] [task=%X{taskId:-}] %logger{36} - %msg%n"

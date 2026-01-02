@@ -50,6 +50,22 @@
             <artifactId>kafka-clients</artifactId>
         </dependency>
 
+        <!-- Metrics & Monitoring -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
+        <!-- Spring Boot Actuator (for health checks) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>

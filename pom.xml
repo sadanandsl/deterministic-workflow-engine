@@ -38,6 +38,7 @@
         <jackson.version>2.16.0</jackson.version>
         <flyway.version>10.4.1</flyway.version>
         <hikari.version>5.1.0</hikari.version>
+        <micrometer.version>1.12.1</micrometer.version>
         <slf4j.version>2.0.9</slf4j.version>
         <logback.version>1.4.14</logback.version>
         <junit.version>5.10.1</junit.version>
@@ -104,6 +105,18 @@
                 <groupId>org.apache.kafka</groupId>
                 <artifactId>kafka-clients</artifactId>
                 <version>${kafka.version}</version>
+            </dependency>
+
+            <!-- Metrics & Monitoring -->
+            <dependency>
+                <groupId>io.micrometer</groupId>
+                <artifactId>micrometer-core</artifactId>
+                <version>${micrometer.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.micrometer</groupId>
+                <artifactId>micrometer-registry-prometheus</artifactId>
+                <version>${micrometer.version}</version>
             </dependency>
 
             <!-- JSON -->
